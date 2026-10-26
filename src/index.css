@@ -1,13 +1,11 @@
-/* 1. Impor Leaflet paling atas */
 @import 'leaflet/dist/leaflet.css';
+@import "tailwindcss";
 
-/* 2. Diikuti oleh Tailwind */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Wajib untuk Tailwind v4 agar toggle dark mode bisa jalan */
+@custom-variant dark (&:where(.dark, .dark *));
 
-/* 3. Tambahan khusus Leaflet (Opsional tapi disarankan) */
-/* Mencegah peta Leaflet menutupi elemen seperti dropdown/navbar Tailwind */
+/* --- Tambahan Leaflet --- */
 .leaflet-container {
-  z-index: 10; 
+  z-index: 0;
+  isolation: isolate;
 }

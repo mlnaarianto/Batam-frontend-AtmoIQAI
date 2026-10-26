@@ -1,36 +1,64 @@
-import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import { useEffect, useState, type FormEvent } from 'react';
+import { isAxiosError } from 'axios';
+import { api } from '../lib/api';
 
-const formatSafeId = (id: any) => {
+// ID dari Golang bisa berupa string atau array of bytes (UUID)
+type RawId = string | number[];
+
+interface PermissionItem {
+  id?: RawId;
+  ID?: RawId;
+  name: string;
+}
+
+interface RoleItem {
+  id?: RawId;
+  ID?: RawId;
+  name: string;
+  permissions?: PermissionItem[];
+}
+
+const formatSafeId = (id: RawId | undefined): string => {
   if (Array.isArray(id) && id.length === 16) {
-    const hex = id.map((b: number) => b.toString(16).padStart(2, '0')).join('');
+    const hex = id.map((b) => b.toString(16).padStart(2, '0')).join('');
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
-  return id;
+  return String(id ?? '');
 };
 
-export default function RolesPermissionsPage() {
-  const [roles, setRoles] = useState<any[]>([]);
-  const [allPermissions, setAllPermissions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+const getId = (item: { id?: RawId; ID?: RawId }) => formatSafeId(item.id ?? item.ID);
 
-  const [selectedRole, setSelectedRole] = useState<any>(null);
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (isAxiosError(err)) {
+    if (err.response?.status === 403) return 'Kamu tidak punya izin untuk aksi ini.';
+    const d = err.response?.data;
+    return d?.error || d?.message || fallback;
+  }
+  return fallback;
+}
+
+export default function RolesPermissionsPage() {
+  const [roles, setRoles] = useState<RoleItem[]>([]);
+  const [allPermissions, setAllPermissions] = useState<PermissionItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
+  const [selectedRole, setSelectedRole] = useState<RoleItem | null>(null);
   const [selectedPermissionIds, setSelectedPermissionIds] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const fetchData = async () => {
+    setLoadError('');
     try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:8080/api/admin/rbac', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
+      // Token & auto-refresh ditangani interceptor di lib/api.ts
+      const response = await api.get('/api/admin/rbac');
       const resData = response.data?.data?.data || response.data?.data || response.data;
       setRoles(resData.roles || []);
       setAllPermissions(resData.permissions || []);
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Gagal mengambil data Role & Permission.');
+    } catch (err) {
+      setLoadError(getErrorMessage(err, 'Gagal mengambil data Role & Permission.'));
+    } finally {
       setLoading(false);
     }
   };
@@ -39,104 +67,235 @@ export default function RolesPermissionsPage() {
     fetchData();
   }, []);
 
-  const handleOpenEdit = (role: any) => {
+  const handleOpenEdit = (role: RoleItem) => {
+    setNotice(null);
     setSelectedRole(role);
-    const currentPermIds = role.permissions
-      ? role.permissions.map((p: any) => formatSafeId(p.id || p.ID))
-      : [];
-    setSelectedPermissionIds(currentPermIds);
+    setSelectedPermissionIds((role.permissions ?? []).map(getId));
   };
 
-  const handleSavePermissions = async (e: React.FormEvent) => {
+  const handleSavePermissions = async (e: FormEvent) => {
     e.preventDefault();
-    if (!selectedRole) return;
+    if (!selectedRole || saving) return;
 
-    const rawRoleId = selectedRole.id || selectedRole.ID;
-    const safeRoleId = formatSafeId(rawRoleId);
-
+    setSaving(true);
+    setNotice(null);
     try {
-      const token = localStorage.getItem('token');
-      await axios.put(
-        `http://localhost:8080/api/admin/roles/${safeRoleId}/permissions`,
-        { permission_ids: selectedPermissionIds },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-
-      alert('Permission role berhasil diperbarui!');
+      await api.put(`/api/admin/roles/${getId(selectedRole)}/permissions`, {
+        permission_ids: selectedPermissionIds,
+      });
+      setNotice({ type: 'success', text: `Permission role ${selectedRole.name} berhasil diperbarui.` });
       setSelectedRole(null);
-      fetchData();
-    } catch (err: any) {
-      console.error("DETAIL ERROR:", err.response?.data);
-      alert(err.response?.data?.error || err.response?.data?.message || 'Gagal memperbarui permission.');
+      await fetchData();
+    } catch (err) {
+      console.error('DETAIL ERROR:', isAxiosError(err) ? err.response?.data : err);
+      setNotice({ type: 'error', text: getErrorMessage(err, 'Gagal memperbarui permission.') });
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleCheckboxChange = (permId: string) => {
-    if (selectedPermissionIds.includes(permId)) {
-      setSelectedPermissionIds(selectedPermissionIds.filter((id) => id !== permId));
-    } else {
-      setSelectedPermissionIds([...selectedPermissionIds, permId]);
-    }
+    setSelectedPermissionIds((prev) =>
+      prev.includes(permId) ? prev.filter((id) => id !== permId) : [...prev, permId],
+    );
   };
 
-  if (loading) return <div className="p-8 text-slate-500 font-medium">Memuat data sistem...</div>;
-  if (error) return <div className="p-8 text-rose-600 font-medium">{error}</div>;
+  /* ============ Header reusable ============ */
+  const Header = (
+    <div>
+      <div className="mb-2 inline-flex w-fit items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/5 px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-700 dark:border-cyan-400/25 dark:bg-cyan-400/5 dark:text-cyan-300">
+        <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-60" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-500" />
+        </span>
+        rbac · roles
+      </div>
+      <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 sm:text-3xl">
+        Kelola{' '}
+        <span className="bg-gradient-to-r from-cyan-600 via-cyan-500 to-amber-500 bg-clip-text text-transparent dark:from-cyan-300 dark:via-cyan-400 dark:to-amber-300">
+          Role &amp; Permission
+        </span>
+      </h1>
+      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+        Kelola daftar role dan permission yang dimiliki setiap role.
+      </p>
+    </div>
+  );
+
+  /* ============ Loading state ============ */
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        {Header}
+        <div className="h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent" />
+        <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-800 dark:bg-[#0b1220] dark:text-slate-400">
+          <svg className="h-4 w-4 animate-spin text-cyan-500" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
+            <path d="M22 12a10 10 0 00-10-10" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+          </svg>
+          <span className="font-medium">Memuat data sistem...</span>
+        </div>
+      </div>
+    );
+  }
+
+  /* ============ Error state ============ */
+  if (loadError) {
+    return (
+      <div className="space-y-6">
+        {Header}
+        <div className="h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent" />
+        <div
+          role="alert"
+          className="relative overflow-hidden rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/5 dark:text-rose-300"
+        >
+          <div aria-hidden="true" className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-rose-500/60 to-transparent" />
+          <div className="flex items-start gap-2.5">
+            <svg className="mt-0.5 h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008zM21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <p className="font-medium leading-relaxed">{loadError}</p>
+              <button
+                onClick={() => {
+                  setLoading(true);
+                  fetchData();
+                }}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 shadow-sm ring-1 ring-rose-200 transition-colors hover:bg-rose-100 dark:bg-rose-500/10 dark:text-rose-300 dark:ring-rose-500/30 dark:hover:bg-rose-500/20"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Coba lagi
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="p-8 max-w-6xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Kelola Role &amp; Permission</h1>
-        <p className="text-sm text-slate-500">Kelola daftar role dan permission yang dimiliki setiap role.</p>
+    <div className="space-y-6">
+      {/* ============ Header ============ */}
+      {Header}
+
+      {/* Divider */}
+      <div className="h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent" />
+
+      {/* ============ Notice ============ */}
+      {notice && (
+        <div
+          className={`relative overflow-hidden rounded-xl border p-3.5 text-xs font-medium ${
+            notice.type === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/5 dark:text-emerald-300'
+              : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/5 dark:text-rose-300'
+          }`}
+        >
+          <div
+            aria-hidden="true"
+            className={`absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent to-transparent ${
+              notice.type === 'success' ? 'via-emerald-500/60' : 'via-rose-500/60'
+            }`}
+          />
+          <div className="flex items-start gap-2.5">
+            <span className="mt-0.5 shrink-0">
+              {notice.type === 'success' ? (
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="2.2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              ) : (
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="2.2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008zM21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+            </span>
+            <span className="leading-relaxed">{notice.text}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ============ Section label ============ */}
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
+          role · permission
+        </p>
+        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+          {roles.length} role · {allPermissions.length} permission
+        </span>
       </div>
 
-      {/* Tabel Role */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-8">
-        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50">
-          <h3 className="font-semibold text-slate-800 text-sm">Daftar Role &amp; Permission</h3>
+      {/* ============ Tabel Role ============ */}
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-[#0b1220]">
+        <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-6 py-3.5 dark:border-slate-800 dark:bg-slate-900/40">
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+            Daftar Role &amp; Permission
+          </h3>
+          <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+            roles
+          </span>
         </div>
+
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full border-collapse text-left">
             <thead>
-              <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500 uppercase bg-slate-50/50">
+              <tr className="border-b border-slate-200 bg-slate-50/50 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500 dark:border-slate-800 dark:bg-slate-900/20 dark:text-slate-400">
                 <th className="px-6 py-3">Nama Role</th>
                 <th className="px-6 py-3">Permission Aktif</th>
                 <th className="px-6 py-3 text-right">Aksi</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-200 text-sm text-slate-700">
+            <tbody className="divide-y divide-slate-200 text-sm text-slate-700 dark:divide-slate-800 dark:text-slate-300">
               {roles.length > 0 ? (
-                roles.map((role, index) => {
-                  const uniqueKey = formatSafeId(role.id || role.ID) || index;
-                  return (
-                    <tr key={uniqueKey} className="hover:bg-slate-50/50 transition-colors">
-                      <td className="px-6 py-4 font-medium text-slate-900">{role.name}</td>
-                      <td className="px-6 py-4">
-                        <div className="flex gap-1.5 flex-wrap">
-                          {role.permissions && role.permissions.length > 0 ? (
-                            role.permissions.map((perm: any, idx: number) => (
-                              <span key={idx} className="px-2.5 py-1 text-xs font-medium bg-emerald-50 text-emerald-700 rounded-md border border-emerald-100">
-                                {perm.name}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-xs text-slate-400 italic">Tanpa Permission</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => handleOpenEdit(role)}
-                          className="px-3 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors"
-                        >
-                          Edit Permission
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })
+                roles.map((role, index) => (
+                  <tr
+                    key={getId(role) || index}
+                    className="transition-colors hover:bg-slate-50/50 dark:hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-500 text-[11px] font-bold text-white">
+                          {role.name.slice(0, 2).toUpperCase()}
+                        </span>
+                        <span className="font-medium text-slate-900 dark:text-slate-100">
+                          {role.name}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-wrap gap-1.5">
+                        {role.permissions && role.permissions.length > 0 ? (
+                          role.permissions.map((perm) => (
+                            <span
+                              key={perm.name}
+                              className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-300"
+                            >
+                              {perm.name}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="font-mono text-[10px] uppercase tracking-wide text-slate-400 italic dark:text-slate-500">
+                            tanpa permission
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <button
+                        onClick={() => handleOpenEdit(role)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:border-cyan-400/50 hover:text-cyan-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-200 dark:hover:border-cyan-400/40 dark:hover:text-cyan-300"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                        Edit Permission
+                      </button>
+                    </td>
+                  </tr>
+                ))
               ) : (
                 <tr>
-                  <td colSpan={3} className="px-6 py-8 text-center text-slate-400 italic">
+                  <td colSpan={3} className="px-6 py-10 text-center text-slate-400 italic dark:text-slate-500">
                     Tidak ada data role ditemukan.
                   </td>
                 </tr>
@@ -146,47 +305,90 @@ export default function RolesPermissionsPage() {
         </div>
       </div>
 
-      {/* Form Edit Permission Role */}
+      {/* ============ Form Edit Permission Role ============ */}
       {selectedRole && (
-        <div className="bg-white p-6 rounded-xl shadow-md border border-slate-200 max-w-lg">
-          <h3 className="text-lg font-bold text-slate-900 mb-2">
-            Edit Permission untuk Role: <span className="text-indigo-600">{selectedRole.name}</span>
-          </h3>
-          <p className="text-xs text-slate-500 mb-4">Pilih permission yang ingin diberikan kepada role ini.</p>
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-[#0b1220]">
+          {/* Header form */}
+          <div className="border-b border-slate-200 bg-slate-50 px-6 py-3.5 dark:border-slate-800 dark:bg-slate-900/40">
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-8 w-8 place-items-center rounded-lg bg-cyan-500/10 text-cyan-600 ring-1 ring-cyan-500/25 dark:bg-cyan-400/10 dark:text-cyan-300 dark:ring-cyan-400/25">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.9" stroke="currentColor">
+                  <rect x="4" y="11" width="16" height="10" rx="2" />
+                  <path d="M8 11V7a4 4 0 118 0v4" />
+                </svg>
+              </span>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  Edit Permission untuk Role{' '}
+                  <span className="bg-gradient-to-r from-cyan-600 to-amber-500 bg-clip-text text-transparent dark:from-cyan-300 dark:to-amber-300">
+                    {selectedRole.name}
+                  </span>
+                </h3>
+                <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                  pilih permission yang ingin diberikan
+                </p>
+              </div>
+            </div>
+          </div>
 
-          <form onSubmit={handleSavePermissions}>
-            <div className="space-y-2 mb-6">
-              {allPermissions.map((perm: any) => {
-                const permId = formatSafeId(perm.id || perm.ID);
+          <form onSubmit={handleSavePermissions} className="p-6">
+            <div className="mb-6 space-y-2">
+              {allPermissions.map((perm) => {
+                const permId = getId(perm);
+                const checked = selectedPermissionIds.includes(permId);
                 return (
-                  <label key={permId} className="flex items-center gap-3 p-3 rounded-lg border border-slate-100 hover:bg-slate-50 cursor-pointer">
+                  <label
+                    key={permId}
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors ${
+                      checked
+                        ? 'border-cyan-500/40 bg-cyan-50/70 dark:border-cyan-400/40 dark:bg-cyan-500/10'
+                        : 'border-slate-200 hover:border-cyan-400/30 hover:bg-slate-50 dark:border-slate-700 dark:hover:border-cyan-400/30 dark:hover:bg-white/[0.02]'
+                    }`}
+                  >
                     <input
                       type="checkbox"
-                      checked={selectedPermissionIds.includes(permId)}
+                      checked={checked}
                       onChange={() => handleCheckboxChange(permId)}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500 dark:border-slate-600 dark:bg-slate-800"
                     />
-                    <div>
-                      <p className="text-sm font-medium text-slate-800">{perm.name}</p>
-                    </div>
+                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                      {perm.name}
+                    </p>
                   </label>
                 );
               })}
             </div>
 
-            <div className="flex justify-end gap-3">
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
                 onClick={() => setSelectedRole(null)}
-                className="px-4 py-2 text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors"
+                disabled={saving}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-200 dark:hover:bg-slate-800/60"
               >
                 Batal
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors shadow-sm"
+                disabled={saving}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-700 hover:to-cyan-700 hover:shadow-blue-600/35 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-400 disabled:shadow-none dark:from-cyan-500 dark:to-indigo-500 dark:shadow-cyan-500/20 dark:hover:from-cyan-600 dark:hover:to-indigo-600"
               >
-                Simpan Perubahan
+                {saving ? (
+                  <>
+                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
+                      <path d="M22 12a10 10 0 00-10-10" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                    </svg>
+                    Menyimpan...
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="2.2" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                    Simpan Perubahan
+                  </>
+                )}
               </button>
             </div>
           </form>

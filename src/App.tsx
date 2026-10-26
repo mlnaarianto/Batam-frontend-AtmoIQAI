@@ -1,13 +1,15 @@
+// src/App.tsx
 import { useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from './pages/LoginPage';
 import AppLayout from './components/AppLayout';
 import DashboardPage from './pages/DashboardPage';
-import StationsPage from './pages/StationsPage'; 
-import WeatherPredictionsPage from './pages/WeatherPredictionsPage'; 
-import RbacPage from './pages/RbacPage'; 
-import RolesPermissionsPage from './pages/RolesPermissionsPage'; 
+import StationsPage from './pages/StationsPage';
+import WeatherPredictionsPage from './pages/WeatherPredictionsPage';
+import RbacPage from './pages/RbacPage';
+import RolesPermissionsPage from './pages/RolesPermissionsPage';
+import ProfilePage from './pages/ProfilePage';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
@@ -31,53 +33,32 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         {/* ========================================== */}
-        {/* RUTE PUBLIK (Tanpa Login)                    */}
+        {/* RUTE PUBLIK                                */}
         {/* ========================================== */}
-
-        {/* Default route saat pertama buka aplikasi -> langsung ke halaman publik */}
-        <Route 
-          path="/" 
-          element={<Navigate to="/public/weather" replace />} 
-        />
-
-        {/* Route Login */}
-        <Route 
-          path="/login" 
-          element={token ? <Navigate to="/admin/dashboard" replace /> : <LoginPage />} 
-        />
-        
-        {/* Route Publik untuk Masyarakat Umum (Standalone tanpa Sidebar Admin) */}
-        <Route 
-          path="/public/weather" 
-          element={<div className="p-4 md:p-8 bg-slate-50 min-h-screen"><WeatherPredictionsPage /></div>} 
-        />
+        <Route path="/" element={<Navigate to="/public/weather" replace />} />
+        <Route path="/login" element={token ? <Navigate to="/admin/dashboard" replace /> : <LoginPage />} />
+        <Route path="/public/weather" element={<div className="p-4 md:p-8 bg-slate-50 min-h-screen"><WeatherPredictionsPage /></div>} />
 
         {/* ========================================== */}
-        {/* RUTE ADMIN TERPROTEKSI (Butuh Login)         */}
-        {/* Semua rute admin sekarang berada di bawah prefix /admin  */}
+        {/* RUTE TERPROTEKSI (Butuh Login)             */}
+        {/* Menggunakan Pathless Route agar layout tetap sama */}
         {/* ========================================== */}
-        <Route 
-          path="/admin" 
-          element={
-            <ProtectedRoute>
-              <AppLayout />
-            </ProtectedRoute>
-          }
-        >
-          {/* Default Route: otomatis ke /admin/dashboard */}
-          <Route index element={<Navigate to="/admin/dashboard" replace />} />
+        <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
           
-          <Route path="dashboard" element={<DashboardPage />} />
-          <Route path="stations" element={<StationsPage />} />
+          {/* RUTE ADMIN */}
+          <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+          <Route path="/admin/dashboard" element={<DashboardPage />} />
+          <Route path="/admin/stations" element={<StationsPage />} />
+          <Route path="/admin/weather-predictions" element={<WeatherPredictionsPage />} />
+          <Route path="/admin/rbac" element={<RbacPage />} />
+          <Route path="/admin/roles-permissions" element={<RolesPermissionsPage />} />
+
+          {/* RUTE PROFIL (Di luar prefix /admin, tapi tetap di dalam Layout) */}
+          <Route path="/profile" element={<ProfilePage />} />
           
-          {/* Rute Prediksi Cuaca khusus Admin (Berada di dalam Sidebar) */}
-          <Route path="weather-predictions" element={<WeatherPredictionsPage />} />
-          
-          <Route path="rbac" element={<RbacPage />} />
-          <Route path="roles-permissions" element={<RolesPermissionsPage />} />
         </Route>
 
-        {/* Fallback: path yang tidak dikenali -> balik ke halaman publik */}
+        {/* Fallback */}
         <Route path="*" element={<Navigate to="/public/weather" replace />} />
       </Routes>
     </BrowserRouter>
